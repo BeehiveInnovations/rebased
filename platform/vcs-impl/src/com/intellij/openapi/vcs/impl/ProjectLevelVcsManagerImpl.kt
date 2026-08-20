@@ -537,6 +537,8 @@ class ProjectLevelVcsManagerImpl(
     val compute = {
       when {
         project.isDisposed() || project.isDefault -> false
+        // WorkspaceFileIndex is created later in project startup, so pre-init mapping checks cannot query it yet.
+        !project.isInitialized -> false
         !file.isValid() -> false
         else -> FileIndexFacade.getInstance(project).isUnderIgnored(file)
       }
