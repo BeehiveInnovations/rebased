@@ -4,11 +4,12 @@ package git4idea.ignore
 import com.intellij.dvcs.ignore.TransientIgnoredDirectoryIndexExcludePolicy
 import com.intellij.dvcs.repo.VcsRepositoryManager
 import com.intellij.dvcs.repo.VcsRepositoryMappingListener
+import com.intellij.ide.trustedProjects.TrustedProjects
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.runReadActionBlocking
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
-import com.intellij.openapi.components.serviceAsync
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.options.advanced.AdvancedSettings
 import com.intellij.openapi.progress.coroutineToIndicator
@@ -24,10 +25,14 @@ import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vcs.FilePath
 import com.intellij.openapi.vcs.ProjectLevelVcsManager
 import com.intellij.openapi.vcs.VcsException
+import com.intellij.openapi.vcs.impl.DefaultVcsRootPolicy
 import com.intellij.openapi.vcs.impl.ModuleVcsDetector
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
 import git4idea.GitContentRevision
+import git4idea.GitUtil
+import git4idea.GitVcs
 import git4idea.index.getFileStatus
 import git4idea.index.isIgnored
 import git4idea.repo.GitRepository
@@ -90,35 +95,33 @@ class GitIgnoredDirectoryExclusions(private val project: Project, private val co
   }
 
   /**
-   * Waits for Git's first ignored-path result and publishes the complete initial snapshot before indexing starts.
+   * Publishes a read-only Git snapshot before indexing without activating the project's VCS pipeline.
+   *
+   * VCS startup must wait until the project is open because its dirty-scope manager captures that lifecycle state. This initializer therefore
+   * reads persisted mappings and Git metadata directly, then lets normal post-open repository events replace the provisional snapshot.
    */
   suspend fun initialize() {
     repositoryStateMutex.withLock {
-      ProjectLevelVcsManager.getInstance(project).awaitInitialization()
-      // Initial VCS mapping detection runs on a merging queue, so VCS initialization alone does not guarantee repositories exist.
-      // Its startup activity is intentionally disabled in unit tests, where fixtures install repository mappings directly.
-      if (!ApplicationManager.getApplication().isUnitTestMode) {
-        project.serviceAsync<ModuleVcsDetector>().awaitInitialDetection()
-      }
-      // Mapping detection publishes through a separate delayed repository-manager update; force and await that collection refresh.
-      project.serviceAsync<VcsRepositoryManager>().ensureUpToDate(force = true)
-
-      val repositories = GitRepositoryManager.getInstance(project).repositories
-      val initialSnapshot = LinkedHashMap<String, Set<FilePath>>(repositories.size)
-      try {
-        for (repository in repositories) {
-          initialSnapshot[repository.root.url] = queryIgnoredDirectories(repository)
-        }
-      }
-      catch (e: VcsException) {
-        // A partial snapshot could hide files in repositories whose Git status is still unknown.
-        LOG.warn("Unable to initialize Git-ignored directory exclusions", e)
-        updateSnapshot { emptyMap() }
+      if (!TrustedProjects.isProjectTrusted(project)) {
+        replaceInitialSnapshot(emptyMap(), emptySet())
         active.set(true)
         return@withLock
       }
 
-      updateSnapshot { initialSnapshot }
+      val roots = initialGitRoots()
+      val initialSnapshot = LinkedHashMap<String, Set<FilePath>>(roots.gitRoots.size)
+      for (root in roots.gitRoots) {
+        initialSnapshot[root.url] = try {
+          queryIgnoredDirectories(root)
+        }
+        catch (e: VcsException) {
+          // A failed root stays in the ownership snapshot so an outer repository cannot hide it.
+          LOG.warn("Unable to initialize Git-ignored directory exclusions for ${root.presentableUrl}", e)
+          emptySet()
+        }
+      }
+
+      replaceInitialSnapshot(initialSnapshot, roots.vcsRootPaths)
       active.set(true)
     }
   }
@@ -145,7 +148,7 @@ class GitIgnoredDirectoryExclusions(private val project: Project, private val co
     if (!isCurrentRepository(repository)) return
 
     val ignoredDirectories = try {
-      queryIgnoredDirectories(repository)
+      queryIgnoredDirectories(repository.root)
     }
     catch (e: VcsException) {
       LOG.warn("Unable to refresh Git-ignored directory exclusions for ${repository.root.presentableUrl}", e)
@@ -208,7 +211,7 @@ class GitIgnoredDirectoryExclusions(private val project: Project, private val co
     for (repository in repositories) {
       val rootUrl = repository.root.url
       queriedDirectories[rootUrl] = try {
-        queryIgnoredDirectories(repository)
+        queryIgnoredDirectories(repository.root)
       }
       catch (e: VcsException) {
         LOG.warn("Unable to refresh Git-ignored directory exclusions for ${repository.root.presentableUrl}", e)
@@ -239,17 +242,34 @@ class GitIgnoredDirectoryExclusions(private val project: Project, private val co
            repositories.all { repository -> repositoryManager.getRepositoryForRootQuick(repository.root) === repository }
   }
 
+  private fun replaceInitialSnapshot(byRepository: Map<String, Set<FilePath>>, vcsRoots: Set<String>) {
+    updateSnapshot(
+      vcsRoots = { vcsRoots },
+      transform = { byRepository },
+    )
+  }
+
   private fun updateSnapshot(transform: (Map<String, Set<FilePath>>) -> Map<String, Set<FilePath>>) {
+    updateSnapshot(
+      vcsRoots = ::vcsRootPaths,
+      transform = transform,
+    )
+  }
+
+  private fun updateSnapshot(
+    vcsRoots: () -> Set<String>,
+    transform: (Map<String, Set<FilePath>>) -> Map<String, Set<FilePath>>,
+  ) {
     while (true) {
       val current = snapshot.get()
       val replacementByRepository = transform(current.byRepository)
-      val sourceRoots = sourceRootPaths()
-      val vcsRoots = vcsRootPaths()
+      val replacementSourceRoots = sourceRootPaths()
+      val replacementVcsRoots = vcsRoots()
       if (replacementByRepository == current.byRepository &&
-          sourceRoots == current.sourceRoots &&
-          vcsRoots == current.vcsRoots) return
+          replacementSourceRoots == current.sourceRoots &&
+          replacementVcsRoots == current.vcsRoots) return
 
-      val replacement = Snapshot(replacementByRepository, sourceRoots, vcsRoots)
+      val replacement = Snapshot(replacementByRepository, replacementSourceRoots, replacementVcsRoots)
 
       if (snapshot.compareAndSet(current, replacement)) {
         scheduleRootsChange()
@@ -274,20 +294,69 @@ class GitIgnoredDirectoryExclusions(private val project: Project, private val co
     }, project.disposed)
   }
 
-  private suspend fun queryIgnoredDirectories(repository: GitRepository): Set<FilePath> {
+  private suspend fun queryIgnoredDirectories(root: VirtualFile): Set<FilePath> {
     val statuses = withContext(Dispatchers.IO) {
       coroutineToIndicator {
-        getFileStatus(project, repository.root, emptyList(), false, true, true)
+        getFileStatus(project, root, emptyList(), false, true, true)
       }
     }
     val ignoredPaths = statuses.asSequence()
       .filter { isIgnored(it.index) }
-      .map { GitContentRevision.createPath(repository.root, it.path, it.path.endsWith("/")) }
+      .map { GitContentRevision.createPath(root, it.path, it.path.endsWith("/")) }
     return ignoredPaths.filter(FilePath::isDirectory).toSet()
   }
 
   private fun rawIgnoredDirectories(repository: GitRepository): Set<FilePath> {
     return repository.untrackedFilesHolder.rawIgnoredFilePaths.filterTo(mutableSetOf(), FilePath::isDirectory)
+  }
+
+  /**
+   * Resolves the Git roots needed for the pre-index snapshot from persisted project state only.
+   *
+   * This mirrors direct-mapping priority and checks only each project root and its ancestors. It never scans descendants, persists mappings,
+   * creates repositories, or starts VCS initialization.
+   */
+  @Suppress("UnstableApiUsage")
+  private fun initialGitRoots(): InitialRoots {
+    val vcsManager = ProjectLevelVcsManager.getInstance(project)
+    val mappings = vcsManager.directoryMappings
+    val localFileSystem = LocalFileSystem.getInstance()
+    val directMappings = mappings.asSequence()
+      .filterNot { it.isDefaultMapping }
+      .mapNotNull { mapping ->
+        localFileSystem.findFileByPath(mapping.directory)
+          ?.takeIf(VirtualFile::isDirectory)
+          ?.let { mapping to it }
+      }
+      .toList()
+    val directMappingDirectories = directMappings.mapTo(mutableSetOf()) { it.second }
+
+    val gitRoots = directMappings.asSequence()
+      .filter { it.first.vcs == GitVcs.NAME }
+      .map { it.second }
+      .filter { it.isDirectory && GitUtil.isGitRoot(it.toNioPath()) }
+      .toCollection(linkedSetOf())
+
+    val hasDefaultGitMapping = mappings.any { it.isDefaultMapping && it.vcs == GitVcs.NAME }
+    val needsInitialDetection = project.getService(ModuleVcsDetector::class.java)
+      .needInitialDetection(PropertiesComponent.getInstance(project), vcsManager)
+    if (hasDefaultGitMapping || needsInitialDetection) {
+      for (projectRoot in DefaultVcsRootPolicy.getInstance(project).getDefaultVcsRoots()) {
+        findGitRoot(projectRoot, directMappingDirectories)?.let(gitRoots::add)
+      }
+    }
+
+    val vcsRootPaths = directMappingDirectories.mapTo(mutableSetOf(), VirtualFile::getPath)
+    gitRoots.mapTo(vcsRootPaths, VirtualFile::getPath)
+    return InitialRoots(gitRoots, vcsRootPaths)
+  }
+
+  /** Returns the nearest Git root above [projectRoot], unless a direct mapping owns the path first. */
+  @Suppress("UnstableApiUsage")
+  private fun findGitRoot(projectRoot: VirtualFile, directMappingDirectories: Set<VirtualFile>): VirtualFile? {
+    return generateSequence(projectRoot) { it.parent }
+      .takeWhile { it !in directMappingDirectories }
+      .firstOrNull { GitUtil.isGitRoot(it.toNioPath()) }
   }
 
   private fun vcsRootPaths(): Set<String> {
@@ -330,6 +399,12 @@ class GitIgnoredDirectoryExclusions(private val project: Project, private val co
       return urls.any { url -> FileUtil.isAncestor(VfsUtilCore.urlToPath(url), path, false) }
     }
   }
+
+  /** Git roots to query and all resolved VCS roots that protect nested ownership during the provisional snapshot. */
+  private data class InitialRoots(
+    val gitRoots: Set<VirtualFile>,
+    val vcsRootPaths: Set<String>,
+  )
 
   private companion object {
     val LOG = logger<GitIgnoredDirectoryExclusions>()

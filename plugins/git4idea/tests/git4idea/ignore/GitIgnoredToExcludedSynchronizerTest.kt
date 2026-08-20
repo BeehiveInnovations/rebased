@@ -2,6 +2,7 @@
 package git4idea.ignore
 
 import com.intellij.dvcs.ignore.IgnoredToExcludeNotificationProvider
+import com.intellij.dvcs.ignore.IgnoredToExcludedSynchronizer
 import com.intellij.openapi.application.invokeAndWaitIfNeeded
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.application.runWriteAction
@@ -14,12 +15,15 @@ import com.intellij.openapi.vcs.VcsBundle
 import com.intellij.openapi.vcs.VcsConfiguration
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.testFramework.common.waitUntil
 import com.intellij.ui.EditorNotificationPanel
 import com.intellij.workspaceModel.ide.registerProjectRoot
+import com.intellij.vcsUtil.VcsUtil
 import git4idea.repo.GitRepositoryFiles.GITIGNORE
 import git4idea.test.GitSingleRepoTest
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Path
+import kotlin.time.Duration.Companion.seconds
 
 const val GEN = "gen"
 
@@ -70,6 +74,11 @@ class GitIgnoredToExcludedSynchronizerTest : GitSingleRepoTest() {
                             /$OUT/
                            """.trimIndent())
 
+    assertContainsElements(
+      repo.untrackedFilesHolder.ignoredFilesHolder.ignoredFilePaths,
+      VcsUtil.getFilePath(out),
+      VcsUtil.getFilePath(excluded),
+    )
     assertExcludedDirs(out, excluded)
   }
 
@@ -113,6 +122,9 @@ class GitIgnoredToExcludedSynchronizerTest : GitSingleRepoTest() {
 
     createGitignoreAndWait("/$OUT/")
 
+    // The holder integration is covered above. This isolates the content-root pattern contract after the fixture no longer owns a repository.
+    project.getService(IgnoredToExcludedSynchronizer::class.java)
+      .onIgnoredFilesUpdate(setOf(VcsUtil.getFilePath(out)), emptySet())
     assertExcludedDirs(out)
     assertContainsElements(ModuleRootManager.getInstance(module).contentEntries.single().excludePatterns, OUT)
   }
@@ -134,7 +146,7 @@ class GitIgnoredToExcludedSynchronizerTest : GitSingleRepoTest() {
   private suspend fun createGitignoreAndWait(gitignoreContent: String) {
     val gitIgnore = file(GITIGNORE).create(gitignoreContent)
     VfsUtil.findFileByIoFile(gitIgnore.file, true) //trigger VFS create event explicitly
-
+    repo.untrackedFilesHolder.invalidate()
     repo.untrackedFilesHolder.awaitNotBusy()
   }
 
@@ -150,7 +162,10 @@ class GitIgnoredToExcludedSynchronizerTest : GitSingleRepoTest() {
     assertTrue("Notification $notificationContent not found", notificationPanel?.text == notificationContent)
   }
 
-  private fun assertExcludedDirs(vararg expectedExcludes: VirtualFile) {
+  private suspend fun assertExcludedDirs(vararg expectedExcludes: VirtualFile) {
+    waitUntil("Ignored directories were not persisted as module exclusions", timeout = 5.seconds) {
+      module.excludes().containsAll(expectedExcludes.toList())
+    }
     val excludes = module.excludes()
     assertContainsElements(excludes, *expectedExcludes)
   }

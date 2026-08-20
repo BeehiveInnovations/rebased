@@ -602,7 +602,7 @@
     <directoryIndexExcludePolicy implementation="git4idea.ignore.GitIgnoredDirectoryIndexExcludePolicy"/>
     <projectPreInit id="gitIgnoredDirectoryExclusionsInitializer"
                     implementation="git4idea.ignore.GitIgnoredDirectoryExclusionsInitializer"
-                    order="before workspaceFileIndexInitializer"/>
+                    order="after initialProjectSynchronizer, before workspaceFileIndexInitializer"/>
 
     <advancedSetting id="git.clone.recurse.submodules" default="true" groupKey="advanced.settings.git"/>
     <advancedSetting id="git.read.content.with" enumClass="git4idea.util.GitTextConvMode" default="FILTERS"

@@ -18,9 +18,7 @@ import com.intellij.util.Alarm
 import com.intellij.util.ui.update.MergingUpdateQueue
 import com.intellij.util.ui.update.Update
 import com.intellij.vcsUtil.VcsUtil
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import org.jetbrains.annotations.ApiStatus.Internal
 import org.jetbrains.annotations.VisibleForTesting
 
@@ -42,8 +40,6 @@ class ModuleVcsDetector(private val project: Project, private val coroutineScope
     it.setRestartTimerOnAdd(true)
   }
 
-  private val initialDetectionDone = CompletableDeferred<Unit>(parent = coroutineScope.coroutineContext[Job])
-
   private val dirtyContentRoots = LinkedHashSet<VirtualFile>()
 
   private suspend fun getVcsManager(): ProjectLevelVcsManagerImpl {
@@ -62,39 +58,27 @@ class ModuleVcsDetector(private val project: Project, private val coroutineScope
            && !vcsManager.hasAnyMappings() && VcsUtil.shouldDetectVcsMappingsFor(project)
   }
 
-  suspend fun awaitInitialDetection() {
-    val props = project.serviceAsync<PropertiesComponent>()
-    val vcsManager = getVcsManager()
-    val willRun = needInitialDetection(props, vcsManager)
-    if (!willRun) return
-    initialDetectionDone.await()
-  }
-
   private suspend fun startInitialDetection() {
     MAPPING_DETECTION_LOG.debug("ModuleVcsDetector.startDetection")
 
     val vcsManager = getVcsManager()
     val props = project.serviceAsync<PropertiesComponent>()
-    if (needInitialDetection(props, vcsManager)) {
-      queue.queue(object : Update("initial scan") {
-        override fun run() = throw UnsupportedOperationException("Sync execution is not supported")
-
-        override suspend fun execute() {
-          val contentRoots = project.serviceAsync<DefaultVcsRootPolicy>().getDefaultVcsRoots()
-          MAPPING_DETECTION_LOG.debug("ModuleVcsDetector.autoDetectDefaultRoots - contentRoots", contentRoots)
-          val rootCheckers = if (props.getBoolean(INITIAL_DETECTION_KEY)) {
-            VcsRootChecker.EXTENSION_POINT_NAME.extensionList.filter { it.shouldAlwaysRunInitialDetection() }
-          }
-          else {
-            VcsRootChecker.EXTENSION_POINT_NAME.extensionList
-          }
-
-          autoDetectForContentRoots(contentRoots = contentRoots, isInitialDetection = true, vcsManager = vcsManager, rootCheckers = rootCheckers)
-          props.updateValue(INITIAL_DETECTION_KEY, true)
-          initialDetectionDone.complete(Unit)
-        }
-      })
+    if (!needInitialDetection(props, vcsManager)) {
+      return
     }
+
+    // Initial startup is already ordered and awaited. Run it directly so queue merging cannot cancel the decision later activities depend on.
+    val contentRoots = project.serviceAsync<DefaultVcsRootPolicy>().getDefaultVcsRoots()
+    MAPPING_DETECTION_LOG.debug("ModuleVcsDetector.autoDetectDefaultRoots - contentRoots", contentRoots)
+    val rootCheckers = if (props.getBoolean(INITIAL_DETECTION_KEY)) {
+      VcsRootChecker.EXTENSION_POINT_NAME.extensionList.filter { it.shouldAlwaysRunInitialDetection() }
+    }
+    else {
+      VcsRootChecker.EXTENSION_POINT_NAME.extensionList
+    }
+
+    autoDetectForContentRoots(contentRoots = contentRoots, isInitialDetection = true, vcsManager = vcsManager, rootCheckers = rootCheckers)
+    props.updateValue(INITIAL_DETECTION_KEY, true)
   }
 
   private fun autoDetectForContentRoots(
@@ -210,9 +194,11 @@ class ModuleVcsDetector(private val project: Project, private val coroutineScope
     autoDetectForContentRoots(contentRoots = contentRoots, vcsManager = getVcsManager())
   }
 
-  internal class ModuleVcsDetectorStartUpActivity : VcsStartupActivity {
+  /** Completes initial VCS mapping detection after the project opens and before later VCS startup activities inspect mappings. */
+  @Internal
+  class ModuleVcsDetectorStartUpActivity(private val runInUnitTests: Boolean = false) : VcsStartupActivity {
     init {
-      if (ApplicationManager.getApplication().isUnitTestMode) {
+      if (ApplicationManager.getApplication().isUnitTestMode && !runInUnitTests) {
         throw ExtensionNotApplicableException.create()
       }
     }
@@ -221,7 +207,8 @@ class ModuleVcsDetector(private val project: Project, private val coroutineScope
       get() = VcsInitObject.MAPPINGS.order + 10
 
     override suspend fun execute(project: Project) {
-      project.serviceAsync<ModuleVcsDetector>().startInitialDetection()
+      val detector = project.serviceAsync<ModuleVcsDetector>()
+      detector.startInitialDetection()
     }
   }
 }
