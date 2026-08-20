@@ -1535,6 +1535,7 @@ private suspend fun runApprovedExtensions(project: Project, epName: String, esse
     if (!isCorePlugin(pluginDescriptor)
         // todo develar
         && !(pluginDescriptor.pluginId.idString == "org.jetbrains.bazel" && assignableToClassName == "org.jetbrains.bazel.flow.open.OpenBazelProjectAndSyncStartupActivity")
+        && !(pluginDescriptor.pluginId.idString == "Git4Idea" && assignableToClassName == "git4idea.ignore.GitIgnoredDirectoryExclusionsInitializer")
         && !(pluginDescriptor.pluginId.idString == "com.jetbrains.remoteDevelopment" && assignableToClassName == "com.intellij.platform.frontend.split.base.core.ThinClientProjectExtensionsConfigurator")) {
       LOG.error(PluginException("Plugin $pluginDescriptor is not approved to add ${ep.name}", pluginDescriptor.pluginId))
       continue

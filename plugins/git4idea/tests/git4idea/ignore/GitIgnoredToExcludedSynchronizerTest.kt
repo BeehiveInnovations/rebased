@@ -3,19 +3,23 @@ package git4idea.ignore
 
 import com.intellij.dvcs.ignore.IgnoredToExcludeNotificationProvider
 import com.intellij.openapi.application.invokeAndWaitIfNeeded
+import com.intellij.openapi.application.readAction
 import com.intellij.openapi.application.runWriteAction
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.roots.ModuleRootManager
+import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.util.registry.Registry
 import com.intellij.openapi.vcs.VcsBundle
 import com.intellij.openapi.vcs.VcsConfiguration
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.EditorNotificationPanel
+import com.intellij.workspaceModel.ide.registerProjectRoot
 import git4idea.repo.GitRepositoryFiles.GITIGNORE
 import git4idea.test.GitSingleRepoTest
 import kotlinx.coroutines.runBlocking
+import java.nio.file.Path
 
 const val GEN = "gen"
 
@@ -82,6 +86,49 @@ class GitIgnoredToExcludedSynchronizerTest : GitSingleRepoTest() {
 
     assertExcludedDirs(out, excluded)
     assertSourceDirs(gen)
+  }
+
+  fun `test do not duplicate a module exclusion pattern as an explicit root`() = runBlocking {
+    runWriteAction {
+      val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+      rootModel.contentEntries.single().addExcludePattern(OUT)
+      rootModel.commit()
+    }
+    VcsConfiguration.getInstance(project).MARK_IGNORED_AS_EXCLUDED = true
+
+    createGitignoreAndWait("/$OUT/")
+
+    assertEmpty(module.excludes())
+    assertContainsElements(ModuleRootManager.getInstance(module).contentEntries.single().excludePatterns, OUT)
+  }
+
+  fun `test an exclusion pattern does not match the content root itself`() = runBlocking {
+    runWriteAction {
+      val rootModel = ModuleRootManager.getInstance(module).modifiableModel
+      rootModel.contentEntries.forEach(rootModel::removeContentEntry)
+      rootModel.addContentEntry(out).addExcludePattern(OUT)
+      rootModel.commit()
+    }
+    VcsConfiguration.getInstance(project).MARK_IGNORED_AS_EXCLUDED = true
+
+    createGitignoreAndWait("/$OUT/")
+
+    assertExcludedDirs(out)
+    assertContainsElements(ModuleRootManager.getInstance(module).contentEntries.single().excludePatterns, OUT)
+  }
+
+  fun `test do not duplicate an automatic workspace exclusion as a module root`() = runBlocking {
+    val worktrees = invokeAndWaitIfNeeded {
+      runWriteAction { repo.root.findOrCreateDir(".worktrees").apply { createFile("worktree.txt") } }
+    }
+    registerProjectRoot(project, Path.of(repo.root.path))
+    assertTrue(readAction { ProjectFileIndex.getInstance(project).isExcluded(worktrees) })
+    VcsConfiguration.getInstance(project).MARK_IGNORED_AS_EXCLUDED = true
+
+    createGitignoreAndWait("/.worktrees/")
+
+    assertTrue(readAction { ProjectFileIndex.getInstance(project).isExcluded(worktrees) })
+    assertEmpty(module.excludes())
   }
 
   private suspend fun createGitignoreAndWait(gitignoreContent: String) {

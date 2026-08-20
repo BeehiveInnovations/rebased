@@ -4,6 +4,10 @@ package com.intellij.workspaceModel.ide
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.serviceAsync
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.io.FileUtil
+import com.intellij.openapi.util.registry.Registry
+import com.intellij.openapi.vfs.VfsUtilCore
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.platform.backend.workspace.WorkspaceModel
 import com.intellij.platform.workspace.storage.EntitySource
 import com.intellij.platform.workspace.storage.WorkspaceEntity
@@ -12,6 +16,32 @@ import com.intellij.platform.workspace.storage.impl.url.toVirtualFileUrl
 import com.intellij.platform.workspace.storage.url.VirtualFileUrl
 import org.jetbrains.annotations.ApiStatus.Internal
 import java.nio.file.Path
+
+private const val AUTOMATIC_EXCLUSION_PATHS_REGISTRY_KEY = "ide.workspace.model.relative.paths.to.exclude.automatically"
+
+/** Returns project-root-relative paths that the workspace file index excludes automatically. */
+@Internal
+fun automaticallyExcludedProjectRootPaths(): List<String> {
+  return Registry.get(AUTOMATIC_EXCLUSION_PATHS_REGISTRY_KEY).asString()
+    .split(";")
+    .map { it.trim() }
+    .filter { it.isNotEmpty() && it != "." }
+}
+
+/** Returns whether [file] is covered by an automatic exclusion below a registered project root. */
+@Internal
+fun isAutomaticallyExcludedFromProjectRoots(project: Project, file: VirtualFile): Boolean {
+  val relativePaths = automaticallyExcludedProjectRootPaths()
+  if (relativePaths.isEmpty()) return false
+
+  val filePath = file.path
+  return WorkspaceModel.getInstance(project).currentSnapshot.entities<ProjectRootEntity>().any { projectRoot ->
+    relativePaths.any { relativePath ->
+      val excludedPath = VfsUtilCore.urlToPath(projectRoot.root.append(relativePath).url)
+      FileUtil.isAncestor(excludedPath, filePath, false)
+    }
+  }
+}
 
 @Internal
 suspend fun registerProjectRoot(project: Project, projectDir: VirtualFileUrl) {

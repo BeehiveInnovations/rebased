@@ -68,12 +68,25 @@ class GitUntrackedFilesHolder internal constructor(
   private val _ignoredFilesHolder = MyGitRepositoryIgnoredFilesHolder()
   val ignoredFilesHolder: GitRepositoryIgnoredFilesHolder get() = _ignoredFilesHolder
 
+  private val rawIgnoredFiles = CopyOnWriteFilePathSet(repoRoot.isCaseSensitive)
+
+  /** Complete ignored paths before nested VCS-root ownership filtering. */
+  @get:ApiStatus.Internal
+  val rawIgnoredFilePaths: Set<FilePath>
+    get() = rawIgnoredFiles.toSet()
+
   private val updateRunner: SingleTaskRunner
   private val LOCK = Any()
 
   @get:ApiStatus.Internal
   val isInitialized: Boolean
     get() = untrackedFiles.initialized
+
+  /** Reports whether the holder contains a complete result from a successful full refresh. */
+  @get:ApiStatus.Internal
+  @Volatile
+  var hasAuthoritativeRefreshResult: Boolean = false
+    private set
 
   init {
     updateRunner = SingleTaskRunner.delayedTaskRunner(cs, 500.milliseconds, ::update)
@@ -94,7 +107,9 @@ class GitUntrackedFilesHolder internal constructor(
     synchronized(LOCK) {
       untrackedFiles.clear()
       _ignoredFilesHolder.clear()
+      rawIgnoredFiles.clear()
       dirtyFiles.clear()
+      hasAuthoritativeRefreshResult = false
     }
   }
 
@@ -211,13 +226,20 @@ class GitUntrackedFilesHolder internal constructor(
     BackgroundTaskUtil.syncPublisher(project, GitRefreshListener.TOPIC).progressStarted()
     try {
       val activity = logUntrackedRefresh(project, dirtyScope == DirtyScope.Everything)
-      val (untracked, ignored) = refreshFiles(dirtyScope)
+      val refreshResult = refreshFiles(dirtyScope)
+      if (!refreshResult.successful || !refreshResult.ignoredCollected) {
+        hasAuthoritativeRefreshResult = false
+      }
+      else if (dirtyScope == DirtyScope.Everything) {
+        hasAuthoritativeRefreshResult = true
+      }
+      val (untracked, ignored) = refreshResult
       activity.finished()
 
       val filteredUntracked = removePathsUnderOtherRoots(untracked, "unversioned")
       val filteredIgnored = removePathsUnderOtherRoots(ignored, "ignored")
 
-      val (oldIgnored, newIgnored) = applyRefreshResult(filteredUntracked, filteredIgnored, dirtyScope)
+      val (oldIgnored, newIgnored) = applyRefreshResult(filteredUntracked, ignored, filteredIgnored, dirtyScope)
 
       BackgroundTaskUtil.syncPublisher(project, GitRefreshListener.TOPIC).repositoryUpdated(repository)
       BackgroundTaskUtil.syncPublisher(project, VcsManagedFilesHolder.TOPIC).updatingModeChanged()
@@ -255,20 +277,20 @@ class GitUntrackedFilesHolder internal constructor(
 
   private fun applyRefreshResult(
     untracked: Set<FilePath>,
+    rawIgnored: Set<FilePath>,
     ignored: Set<FilePath>,
     dirtyScope: DirtyScope,
   ): UpdatedValue<Set<FilePath>> {
     synchronized(LOCK) {
       val oldIgnored = _ignoredFilesHolder.ignoredFilePaths
+      val oldRawIgnored = rawIgnoredFiles.toSet()
 
       val caseSensitive = repoRoot.isCaseSensitive
-      val newIgnored = RecursiveFilePathSet(caseSensitive)
       val newUntracked = RecursiveFilePathSet(caseSensitive)
 
       when (dirtyScope) {
         DirtyScope.Everything -> {
           newUntracked.addAll(untracked)
-          newIgnored.addAll(ignored)
         }
         is DirtyScope.Files -> {
           val dirtyFiles = RecursiveFilePathSet(caseSensitive).apply {
@@ -278,25 +300,47 @@ class GitUntrackedFilesHolder internal constructor(
           untrackedSet.removeIf { dirtyFiles.hasAncestor(it) }
           untrackedSet.addAll(untracked)
           newUntracked.addAll(untrackedSet)
-
-          for (filePath in oldIgnored) {
-            if (!dirtyFiles.hasAncestor(filePath)) {
-              newIgnored.add(filePath)
-            }
-          }
-          for (filePath in ignored) {
-            if (!newIgnored.hasAncestor(filePath)) { // prevent storing both parent and child directories
-              newIgnored.add(filePath)
-            }
-          }
         }
       }
 
+      val newRawIgnored = mergeIgnoredPaths(oldRawIgnored, rawIgnored, dirtyScope, caseSensitive)
+      val newIgnored = mergeIgnoredPaths(oldIgnored, ignored, dirtyScope, caseSensitive)
+      rawIgnoredFiles.set(newRawIgnored)
       _ignoredFilesHolder.ignoredFiles.set(newIgnored)
       untrackedFiles.set(newUntracked)
       isInUpdateMode = isDirty
       return UpdatedValue(oldIgnored, _ignoredFilesHolder.ignoredFilePaths)
     }
+  }
+
+  /** Merges a full or path-scoped Git ignored result into its corresponding holder snapshot. */
+  private fun mergeIgnoredPaths(
+    previous: Set<FilePath>,
+    refreshed: Set<FilePath>,
+    dirtyScope: DirtyScope,
+    caseSensitive: Boolean,
+  ): RecursiveFilePathSet {
+    val replacement = RecursiveFilePathSet(caseSensitive)
+    if (dirtyScope == DirtyScope.Everything) {
+      replacement.addAll(refreshed)
+      return replacement
+    }
+
+    val dirtyFiles = RecursiveFilePathSet(caseSensitive).apply {
+      addAll((dirtyScope as DirtyScope.Files).files)
+    }
+    for (filePath in previous) {
+      if (!dirtyFiles.hasAncestor(filePath)) {
+        replacement.add(filePath)
+      }
+    }
+    for (filePath in refreshed) {
+      if (!replacement.hasAncestor(filePath)) {
+        // Avoid storing both a parent ignored directory and its descendants.
+        replacement.add(filePath)
+      }
+    }
+    return replacement
   }
 
   /**
@@ -353,7 +397,7 @@ class GitUntrackedFilesHolder internal constructor(
           ignored.add(getFilePath(repoRoot, status))
         }
       }
-      return RefreshResult(untracked, ignored)
+      return RefreshResult(untracked, ignored, successful = true, ignoredCollected = withIgnored)
     }
     catch (e: VcsException) {
       LOG.warn(e)
@@ -382,6 +426,9 @@ class GitUntrackedFilesHolder internal constructor(
       synchronized(LOCK) {
         if (ignoredFiles.initialized) {
           ignoredFiles.remove(filePaths)
+        }
+        if (rawIgnoredFiles.initialized) {
+          rawIgnoredFiles.remove(filePaths)
         }
         if (!isEverythingDirty) {
           // break parent ignored directory into separate ignored files
@@ -429,6 +476,8 @@ private sealed interface DirtyScope {
 private data class RefreshResult(
   val untracked: Set<FilePath> = emptySet(),
   val ignored: Set<FilePath> = emptySet(),
+  val successful: Boolean = false,
+  val ignoredCollected: Boolean = false,
 )
 
 private data class UpdatedValue<T>(val old: T, val new: T)

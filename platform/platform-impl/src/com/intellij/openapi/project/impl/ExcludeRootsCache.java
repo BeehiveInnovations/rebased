@@ -7,6 +7,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.project.ProjectManagerListener;
 import com.intellij.openapi.roots.ModuleRootManager;
+import com.intellij.openapi.roots.ProjectRootManager;
 import com.intellij.openapi.roots.impl.DirectoryIndexExcludePolicy;
 import com.intellij.openapi.util.io.OSAgnosticPathUtil;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -38,11 +39,13 @@ import java.util.concurrent.ConcurrentMap;
 @SuppressWarnings("SplitModeApiUsage")
 final class ExcludeRootsCache {
   private static final class CachedUrls {
-    private final long myModificationCount;
+    private final long myEntityStorageVersion;
+    private final long myRootsModificationCount;
     private final String[] myUrls;
 
-    private CachedUrls(long count, String[] urls) {
-      myModificationCount = count;
+    private CachedUrls(long entityStorageVersion, long rootsModificationCount, String[] urls) {
+      myEntityStorageVersion = entityStorageVersion;
+      myRootsModificationCount = rootsModificationCount;
       myUrls = urls;
     }
   }
@@ -78,8 +81,12 @@ final class ExcludeRootsCache {
   @NotNull List<String> getExcludedUrls(@NotNull Project project) {
     return ReadAction.computeBlocking(() -> {
       @SuppressWarnings("UnsafeOpenServiceCast") var wsm = (WorkspaceModelInternal)WorkspaceModel.getInstance(project);
+      var entityStorageVersion = wsm.getEntityStorage().getVersion();
+      var rootsModificationCount = ProjectRootManager.getInstance(project).getModificationCount();
       var cache = myCache.get(project);
-      if (cache != null && cache.myModificationCount == wsm.getEntityStorage().getVersion()) {
+      if (cache != null &&
+          cache.myEntityStorageVersion == entityStorageVersion &&
+          cache.myRootsModificationCount == rootsModificationCount) {
         return List.of(cache.myUrls);
       }
       else {
@@ -102,7 +109,7 @@ final class ExcludeRootsCache {
           }
         }
         var urls = ArrayUtilRt.toStringArray(result);
-        myCache.put(project, new CachedUrls(wsm.getEntityStorage().getVersion(), urls));
+        myCache.put(project, new CachedUrls(entityStorageVersion, rootsModificationCount, urls));
         return List.of(urls);
       }
     });

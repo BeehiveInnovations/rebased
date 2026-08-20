@@ -17,12 +17,14 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.help.HelpManager
-import com.intellij.openapi.module.ModuleUtil
+import com.intellij.openapi.module.Module
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.ProjectFileIndex
+import com.intellij.openapi.roots.impl.DirectoryIndexExcludePolicy
 import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.util.registry.Registry
 import com.intellij.openapi.vcs.FilePath
@@ -39,12 +41,14 @@ import com.intellij.openapi.vcs.changes.shelf.ShelveChangesManager
 import com.intellij.openapi.vcs.changes.ui.SelectFilesDialog
 import com.intellij.openapi.vcs.ignore.IgnoredToExcludedSynchronizerConstants.ASKED_MARK_IGNORED_FILES_AS_EXCLUDED_PROPERTY
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.platform.backend.workspace.WorkspaceModel
 import com.intellij.platform.backend.workspace.virtualFile
 import com.intellij.platform.backend.workspace.workspaceModel
 import com.intellij.platform.ide.progress.withModalProgress
 import com.intellij.platform.workspace.jps.entities.ContentRootEntity
 import com.intellij.platform.workspace.jps.entities.SourceRootEntity
+import com.intellij.workspaceModel.ide.isAutomaticallyExcludedFromProjectRoots
 import com.intellij.ui.EditorNotificationPanel
 import com.intellij.ui.EditorNotificationProvider
 import com.intellij.ui.EditorNotifications
@@ -61,11 +65,19 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.jetbrains.annotations.ApiStatus
+import org.jetbrains.jps.model.fileTypes.FileNameMatcherFactory
 import java.util.Objects
 import java.util.function.Function
 import javax.swing.JComponent
 
 private val LOG = logger<IgnoredToExcludedSynchronizer>()
+
+/** Identifies ignored-directory exclusions that may still be made persistent as module exclusion roots. */
+@ApiStatus.Internal
+interface TransientIgnoredDirectoryIndexExcludePolicy {
+  /** Returns whether this policy excludes [file] only while the VCS reports it ignored. */
+  fun isDynamicallyExcluded(file: VirtualFile): Boolean
+}
 
 /**
  * Shows [EditorNotifications] in .ignore files with a suggestion to exclude ignored directories.
@@ -105,7 +117,7 @@ class IgnoredToExcludedSynchronizer(project: Project, private val cs: CoroutineS
       LOG.debug("updateNotificationState, acquiredFiles", acquiredFiles)
       val filesToRemove = acquiredFiles
         .asSequence()
-        .filter { file -> runReadActionBlocking { fileIndex.isExcluded(file) } || sourceRoots.contains(file) }
+        .filter { file -> isExcludedByAnotherSource(project, fileIndex, file) || sourceRoots.contains(file) }
         .toList()
       LOG.debug("updateNotificationState, filesToRemove", filesToRemove)
 
@@ -214,9 +226,10 @@ class IgnoredToExcludedSynchronizer(project: Project, private val cs: CoroutineS
 
 private fun markIgnoredAsExcluded(project: Project, files: Collection<VirtualFile>) {
   val ignoredDirsByModule = runReadActionBlocking {
+    val fileIndex = ProjectFileIndex.getInstance(project)
     files
-      .groupBy { ModuleUtil.findModuleForFile(it, project) }
-      //if the directory already excluded then ModuleUtil.findModuleForFile return null and this will filter out such directories from processing.
+      // Dynamic ignored-directory policies hide files from normal module lookup, but the persistent action still needs their owner.
+      .groupBy { fileIndex.getModuleForFile(it, false) }
       .filterKeys(Objects::nonNull)
   }
 
@@ -264,10 +277,44 @@ private fun determineIgnoredDirsToExclude(project: Project, ignoredPaths: Collec
     //shelf directory usually contains in project and excluding it prevents local history to work on it
     .filterNot { containsShelfDirectoryOrUnderIt(it, shelfPath) }
     .mapNotNull(FilePath::getVirtualFile)
-    .filterNot { runReadActionBlocking { fileIndex.isExcluded(it) } }
+    .filterNot { isExcludedByAnotherSource(project, fileIndex, it) }
     //do not propose to exclude if there is a source root inside
     .filterNot { ignored -> sourceRoots.contains(ignored) }
     .toList()
+}
+
+private fun isExcludedByAnotherSource(project: Project, fileIndex: ProjectFileIndex, file: VirtualFile): Boolean {
+  return runReadActionBlocking {
+    if (!fileIndex.isExcluded(file)) return@runReadActionBlocking false
+    if (isAutomaticallyExcludedFromProjectRoots(project, file)) return@runReadActionBlocking true
+
+    val module = fileIndex.getModuleForFile(file, false)
+    val isPersistentModuleExclude = module != null && isExcludedByModuleConfiguration(module, file)
+    if (isPersistentModuleExclude) return@runReadActionBlocking true
+
+    DirectoryIndexExcludePolicy.EP_NAME.getExtensions(project)
+      .filterIsInstance<TransientIgnoredDirectoryIndexExcludePolicy>()
+      .none { policy -> policy.isDynamicallyExcluded(file) }
+  }
+}
+
+private fun isExcludedByModuleConfiguration(module: Module, file: VirtualFile): Boolean {
+  val rootManager = ModuleRootManager.getInstance(module)
+  if (rootManager.excludeRoots.any { excludeRoot -> VfsUtilCore.isAncestor(excludeRoot, file, false) }) return true
+
+  for (contentEntry in rootManager.contentEntries) {
+    val contentRoot = contentEntry.file ?: continue
+    if (!VfsUtilCore.isAncestor(contentRoot, file, false)) continue
+
+    val matchers = contentEntry.excludePatterns.map { pattern -> FileNameMatcherFactory.getInstance().createMatcher(pattern) }
+    var current: VirtualFile? = file
+    while (current != null && current != contentRoot) {
+      val candidate = current
+      if (matchers.any { matcher -> matcher.acceptsCharSequence(candidate.nameSequence) }) return true
+      current = candidate.parent
+    }
+  }
+  return false
 }
 
 private fun selectFilesToExclude(project: Project, ignoredDirs: List<VirtualFile>): Collection<VirtualFile> {
