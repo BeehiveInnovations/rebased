@@ -1,12 +1,11 @@
 # Contributing
 
-## AI Code Policy
+> [!NOTE]
+> These contribution guidelines were modified for the Beehive Innovations fork of Rebased and apply only to this fork.
 
-This project does not accept any AI generated code.
+## AI-Assisted Contributions
 
-Please also refrain from unnecessarily padding out your issues, comments or PR descriptions using LLMs. Though you may use AI to assist with translations if you aren't fluent in English.
-
-If you are interested in the motivation behind this decision, [see here](https://detachhead.codeberg.page/workproperly/blog/2026/07/21/i-dont-like-ai/).
+AI-assisted contributions are permitted. Contributors remain responsible for the correctness, security, licensing, testing, and reviewability of everything they submit.
 
 ## Getting the Source Code
 
