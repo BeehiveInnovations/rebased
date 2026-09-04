@@ -1,9 +1,15 @@
 ---
 name: safe-push
-description: Safe Push process for pushing changes to the IntelliJ repository. Use when pushing code changes to remote.
+description: Optional JetBrains Safe Push process. Use only when the user explicitly requests Safe Push or targets a JetBrains protected upstream; normal pushes to this fork use `/usr/bin/git push`.
 ---
 
 # Safe Push Guide for AI Agents
+
+## Fork Policy
+
+- Safe Push is optional in this fork.
+- Do not invoke it for a normal `$git-commit-push` request.
+- Use `/usr/bin/git push` to the configured upstream unless the user explicitly asks for Safe Push or targets a remote that requires it.
 
 This guide covers the Safe Push process for pushing changes to the IntelliJ repository.
 

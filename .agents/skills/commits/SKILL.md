@@ -3,21 +3,18 @@ name: commits
 description: >-
   Use this skill whenever the user asks to commit changes, write or fix a
   commit message, amend or rename a commit, or do a workflow that includes
-  committing in the IntelliJ repository. This is a thin repo-specific overlay:
-  use IntelliJ commit format, write full commit messages by default, and keep
-  requested suffixes such as IJ-MR trailers in a final separate paragraph.
+  committing in this fork. Write full commit messages by default, keep
+  requested ticket IDs or trailers when supplied, and use the configured
+  upstream unless the user requests another destination.
 ---
 
 # Commits
-
-> **Critical:** SafePush/Patronus validates commit messages before allowing merges.
-> Invalid format wastes CI time and reviewer time.
 
 ## Workflow
 
 1. Review the full diff (staged + unstaged) before writing the message.
 2. Identify the motivation: why is this change being made?
-3. Write a subject line: ticket + concise summary (subsystem is not needed when a ticket is present), or label + subsystem + concise summary.
+3. Write a concise subject line. Include a ticket only when the user supplied one.
 4. Write a body for any non-trivial change: explain the "why", summarize
    key design decisions, and note any non-obvious behavioral effects.
    Do not just restate what the diff shows — explain what the reader
@@ -25,16 +22,15 @@ description: >-
 
 ## Source Of Truth
 
-- Follow [docs/IntelliJ-Platform/0_Intro/2_Commits.md](../../../../docs/IntelliJ-Platform/0_Intro/2_Commits.md).
-- This skill is a repo-specific overlay, not a replacement for that document.
-- In this repository, IntelliJ commit format takes precedence over generic commit conventions.
-- Do not use Conventional Commits here.
-- If the user asks to push, use the `safe-push` skill for push workflow details.
+- Follow the user's current Git request and the `$git-commit-push` workflow.
+- Do not require a YouTrack ticket or JetBrains Safe Push for this fork.
+- Push normally to the configured upstream unless the user explicitly requests Safe Push or another destination.
+- Do not use Conventional Commits unless the user asks for them.
 
 ## Quick Rules
 
-- Behavioral changes need a YouTrack ticket in the subject line.
-- When a ticket ID is present, omit the subsystem prefix — the ticket provides sufficient context.
+- Never invent, search for, or require a ticket ID. Preserve one when the user supplies it.
+- When a ticket ID is present, it may lead the subject without a subsystem prefix.
 - Clearly non-behavioral changes may use a non-production label such as `tests`, `cleanup`, `refactor`, `docs`, `format`, `style`, `setup`, or `misc`.
 - If there is any doubt whether the change is behavioral, do not use a non-production label.
 - Write a full commit message (subject + body) for any non-trivial change.
@@ -48,12 +44,10 @@ description: >-
 ## Examples
 
 ```text
-MRI-3589 harden single-flight recursion checks
+git: show outgoing state for each repository
 
-Track active single-flight computations in coroutine context so recursive
-awaits fail fast in both the owning coroutine and child coroutines.
-
-IJ-MR-100
+Show cached incoming and outgoing state in the repository rows so users can
+choose the correct repository without opening each branch submenu.
 ```
 
 ```text
@@ -68,8 +62,3 @@ Parametrized tests now use @MethodSource instead of Theories runner.
 - Subject-only messages for non-trivial changes (even non-production ones).
 - Restating the diff ("changed X in file Y") instead of explaining motivation.
 - Using Conventional Commits format (`fix(scope): ...`).
-
-## References
-
-- [Commit Message Format (comprehensive)](../../../../docs/IntelliJ-Platform/0_Intro/2_Commits.md)
-- [Online: YouTrack Article IJPL-A-217](https://youtrack.jetbrains.com/articles/IJPL-A-217/Commits)
