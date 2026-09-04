@@ -38,6 +38,7 @@ public class SingleRepositoryNode extends RepositoryNode {
     renderer.append(myRepositoryPanel.getArrow(), SimpleTextAttributes.REGULAR_ATTRIBUTES);
     PushTargetPanel pushTargetPanel = myRepositoryPanel.getTargetPanel();
     pushTargetPanel.render(renderer, renderer.getTree().isPathSelected(TreeUtil.getPathFromRoot(this)), true, null);
+    renderPushStatus(renderer);
   }
 
   @Override

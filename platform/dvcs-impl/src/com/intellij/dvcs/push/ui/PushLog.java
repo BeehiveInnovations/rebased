@@ -663,6 +663,8 @@ public final class PushLog extends JPanel implements Disposable, UiDataProvider 
       // it depends on LaF, OS and isItRenderedPane, see com.intellij.ide.ui.laf.darcula.ui.DarculaCheckBoxBorder.
       // null border works as expected always.
       ColoredTreeCellRenderer renderer = getTextRenderer();
+      renderer.setAccessibleStatusText(null);
+      renderer.setIconOnTheRight(false);
       renderer.setIpad(JBInsets.emptyInsets());
       if (value instanceof RepositoryNode valueNode) {
         //todo simplify, remove instance of

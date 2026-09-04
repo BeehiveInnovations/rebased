@@ -334,6 +334,8 @@ public final class PushController implements Disposable {
 
     node.cancelLoading();
     node.setEnabled(true);
+    node.setHasSomethingToPush(false);
+    ((DefaultTreeModel)myPushLog.getTree().getModel()).nodeChanged(node);
 
     final T target = model.getTarget();
     if (target == null) {
@@ -378,6 +380,7 @@ public final class PushController implements Disposable {
           else {
             List<? extends VcsFullCommitDetails> commits = outgoing1.getCommits();
             model.setLoadedCommits(commits);
+            node.setHasSomethingToPush(hasCommitsToPush(model));
             shouldBeSelected = shouldSelectNodeAfterLoad(model);
             myPushLog.setChildren(node, getPresentationForCommits(myProject, model.getLoadedCommits(), model.getNumberOfShownCommits()));
             if (!commits.isEmpty() && shouldBeSelected) {

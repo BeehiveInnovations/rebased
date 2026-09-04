@@ -130,6 +130,9 @@ class GitDefaultBranchesTreeRenderer(treePopupStep: GitBranchesPopupStepBase) : 
     return when (treeNode) {
       is GitStandardLocalBranch -> GitInOutStateHolder.getInstance(treePopupStep.project)
         .getState(treeNode, treePopupStep.affectedRepositoriesIds)
+      is GitBranchesTreeModel.RepositoryNode -> treeNode.repository.state.currentBranch?.let { branch ->
+        GitInOutStateHolder.getInstance(treePopupStep.project).getState(branch, listOf(treeNode.repository.repositoryId))
+      } ?: GitInOutCountersInProject.EMPTY
       is GitBranchesTreeModel.RefUnderRepository -> getIncomingOutgoingState(treeNode.ref)
       else -> GitInOutCountersInProject.EMPTY
     }

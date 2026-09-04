@@ -4,17 +4,21 @@ package com.intellij.dvcs.push.ui;
 import com.intellij.dvcs.push.OutgoingResult;
 import com.intellij.dvcs.push.PushTarget;
 import com.intellij.dvcs.push.PushTargetPanel;
+import com.intellij.dvcs.ui.DvcsBundle;
 import com.intellij.ui.CheckedTreeNode;
 import com.intellij.ui.ColoredTreeCellRenderer;
+import com.intellij.ui.IconManager;
 import com.intellij.ui.SimpleTextAttributes;
 import com.intellij.util.ui.GraphicsUtil;
 import com.intellij.util.ui.UIUtil;
 import com.intellij.util.ui.tree.TreeUtil;
+import icons.DvcsImplIcons;
 import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.swing.Icon;
 import javax.swing.JTree;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,6 +31,7 @@ public class RepositoryNode extends CheckedTreeNode implements EditableTreeNode,
 
   private final @NotNull RepositoryWithBranchPanel myRepositoryPanel;
   private @Nullable Future<AtomicReference<OutgoingResult>> myFuture;
+  private boolean myHasSomethingToPush;
 
   @ApiStatus.Internal
   public RepositoryNode(@NotNull RepositoryWithBranchPanel repositoryPanel, @NotNull CheckBoxModel model, boolean enabled) {
@@ -71,6 +76,21 @@ public class RepositoryNode extends CheckedTreeNode implements EditableTreeNode,
     renderer.append(myRepositoryPanel.getArrow(), repositoryDetailsTextAttributes);
     PushTargetPanel pushTargetPanel = myRepositoryPanel.getTargetPanel();
     pushTargetPanel.render(renderer, renderer.getTree().isPathSelected(TreeUtil.getPathFromRoot(this)), isChecked(), syncEditingText);
+    renderPushStatus(renderer);
+  }
+
+  /**
+   * Adds the shared right-side status for repository rows with something to push.
+   */
+  protected final void renderPushStatus(@NotNull ColoredTreeCellRenderer renderer) {
+    if (myHasSomethingToPush) {
+      Icon targetIcon = renderer.getIcon();
+      renderer.setIconOnTheRight(true);
+      renderer.setIcon(targetIcon == null
+                       ? DvcsImplIcons.Outgoing
+                       : IconManager.getInstance().createRowIcon(targetIcon, DvcsImplIcons.Outgoing));
+      renderer.setAccessibleStatusText(DvcsBundle.message("push.repository.has.changes.to.push"));
+    }
   }
 
   private @Nls @NotNull String getRepoName(@NotNull ColoredTreeCellRenderer renderer, int maxWidth) {
@@ -125,6 +145,13 @@ public class RepositoryNode extends CheckedTreeNode implements EditableTreeNode,
 
   public void stopLoading() {
     myLoading.set(false);
+  }
+
+  /**
+   * Updates whether this repository has commits or target state to push.
+   */
+  public void setHasSomethingToPush(boolean hasSomethingToPush) {
+    myHasSomethingToPush = hasSomethingToPush;
   }
 
   public boolean isLoading() {
