@@ -4,21 +4,20 @@ package git4idea.ignore.actions
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
+import com.intellij.openapi.diagnostic.rethrowControlFlowException
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.vcs.ProjectLevelVcsManager
 import com.intellij.openapi.vcs.VcsBundle
-import com.intellij.openapi.vcs.changes.ChangeListManager
+import com.intellij.openapi.vcs.VcsException
 import com.intellij.openapi.vcs.changes.IgnoredBeanFactory
-import com.intellij.openapi.vcs.changes.actions.ScheduleForAdditionAction
-import com.intellij.openapi.vcs.changes.ignore.actions.getSelectedFiles
+import com.intellij.openapi.vcs.changes.ignore.actions.IgnoreFileSelectionEntry
 import com.intellij.openapi.vcs.changes.ignore.actions.writeIgnoreFileEntries
 import com.intellij.openapi.vfs.VfsUtil
-import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.vcsUtil.VcsUtil
 import git4idea.GitUtil
 import git4idea.GitVcs
+import git4idea.i18n.GitBundle
 import git4idea.i18n.GitBundle.messagePointer
 import git4idea.ignore.lang.GitExcludeFileType
 import org.jetbrains.annotations.Nls
@@ -46,41 +45,51 @@ abstract class DefaultGitExcludeAction(dynamicText: @NotNull Supplier<@Nls Strin
 
 }
 
-class AddToGitExcludeAction : DefaultGitExcludeAction(
+class AddToGitExcludeAction(
+  private val selection: List<IgnoreFileSelectionEntry>,
+  private val executeIgnoreAction: (AnActionEvent, Runnable) -> Unit,
+) : DefaultGitExcludeAction(
   messagePointer("git.add.to.exclude.file.action.text"),
   messagePointer("git.add.to.exclude.file.action.description")
 ) {
-  override fun isEnabled(e: AnActionEvent): Boolean {
-    val project = e.getData(CommonDataKeys.PROJECT) ?: return false
-    val selectedFiles = getSelectedFiles(e)
-    val unversionedFiles = ScheduleForAdditionAction.Manager.getUnversionedFiles(e, project)
-    return isEnabled(project, selectedFiles, unversionedFiles.toList())
-  }
-
-  internal fun isEnabled(project: Project, selectedFiles: List<VirtualFile>, unversionedFiles: List<VirtualFile>): Boolean {
-    val changeListManager = ChangeListManager.getInstance(project)
-    //ScheduleForAdditionAction.getUnversionedFiles can return already ignored directories for VCS which doesn't support directory versioning, should filter it here
-    if (unversionedFiles.none { !it.isDirectory || !changeListManager.isIgnoredFile(it) }) return false
-
-    val vcsManager = ProjectLevelVcsManager.getInstance(project)
-    return selectedFiles.any { vcsManager.getVcsFor(it)?.name == GitVcs.NAME }
-  }
-
   override fun actionPerformed(e: AnActionEvent) {
     val project = e.getData(CommonDataKeys.PROJECT) ?: return
     val gitVcs = GitVcs.getInstance(project)
-    val selectedFiles = getSelectedFiles(e)
-    if (selectedFiles.isEmpty()) return
+    if (selection.any { entry ->
+        !entry.vcsRoot.path.isValid || !entry.file.isValid || !VfsUtil.isAncestor(entry.vcsRoot.path, entry.file, false)
+      }) return
 
-    val filesToIgnore =
+    val filesToIgnore = try {
       VcsUtil.computeWithModalProgress(project, VcsBundle.message("ignoring.files.progress.title"), false) {
-        GitUtil.sortFilesByRepositoryIgnoringMissing(project, selectedFiles)
+        selection.groupBy { entry -> entry.vcsRoot.path }.map { (root, entries) ->
+          GitUtil.getRepositoryForRoot(project, root) to entries.map { entry -> entry.file }
+        }
       }
-    for ((repository, filesToAdd) in filesToIgnore) {
-      val gitExclude = repository.repositoryFiles.excludeFile.let { VfsUtil.findFileByIoFile(it, true) } ?: continue
-      val ignores = filesToAdd.map { file -> IgnoredBeanFactory.ignoreFile(file, project) }
-      writeIgnoreFileEntries(project, gitExclude, ignores, gitVcs, repository.root)
     }
+    catch (e: Exception) {
+      rethrowControlFlowException(e)
+      GitIgnoreFilesOperation.notifyFailure(project, e, afterChangesStarted = false)
+      return
+    }
+    val excludeTargets = filesToIgnore.map { (repository, filesToAdd) ->
+      val excludeFile = repository.repositoryFiles.excludeFile
+      val gitExclude = VfsUtil.findFileByIoFile(excludeFile, true)
+      if (gitExclude == null) {
+        GitIgnoreFilesOperation.notifyFailure(
+          project,
+          VcsException(GitBundle.message("git.ignore.exclude.file.not.found", excludeFile.path)),
+          afterChangesStarted = false,
+        )
+        return
+      }
+      Triple(repository, gitExclude, filesToAdd)
+    }
+    executeIgnoreAction(e, Runnable {
+      for ((repository, gitExclude, filesToAdd) in excludeTargets) {
+        val ignores = filesToAdd.map { file -> IgnoredBeanFactory.ignoreFile(file, project) }
+        writeIgnoreFileEntries(project, gitExclude, ignores, gitVcs, repository.root)
+      }
+    })
   }
 
 }

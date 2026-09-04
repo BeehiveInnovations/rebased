@@ -54,6 +54,39 @@ object GitFileUtils {
     updateUntrackedFilesHolderOnFileRemove(project, root, paths)
   }
 
+  /**
+   * Removes selected paths from the Git index while preserving every worktree file.
+   *
+   * Directory pathspecs are processed recursively, and mixed tracked and untracked selections are accepted. Any staged form of a selected
+   * path is replaced by its removal from the index. Index-backed virtual files and VCS dirty scopes are refreshed after the command
+   * succeeds.
+   *
+   * @param root the Git repository root.
+   * @param paths the file or directory pathspecs to remove from the index.
+   * @throws VcsException if Git cannot update the index.
+   */
+  @JvmStatic
+  @Throws(VcsException::class)
+  fun removePathsFromIndex(project: Project, root: VirtualFile, paths: Collection<FilePath>) {
+    executeForPaths(project, root, GitCommand.RM, toLiteralPathspecs(root, paths)) {
+      addParameters("--cached", "--ignore-unmatch", "-r", "-f")
+    }
+    updateUntrackedFilesHolderOnFileRemove(project, root, paths)
+    GitIndexFileSystemRefresher.refreshFilePaths(project, paths)
+    VcsFileUtil.markFilesDirty(project, paths.toList())
+  }
+
+  /**
+   * Converts exact file paths to literal Git pathspecs without losing recursive directory matching.
+   *
+   * @param root the repository root used to make each path relative.
+   */
+  @JvmStatic
+  @ApiStatus.Internal
+  fun toLiteralPathspecs(root: VirtualFile, paths: Collection<FilePath>): List<String> {
+    return VcsFileUtil.toRelativePaths(root, paths).map { ":(literal)$it" }
+  }
+
   @JvmStatic
   @Throws(VcsException::class)
   fun addFiles(project: Project, root: VirtualFile, vararg files: VirtualFile) {

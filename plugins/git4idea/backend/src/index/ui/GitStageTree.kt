@@ -30,6 +30,7 @@ import com.intellij.openapi.vcs.changes.ui.ChangesBrowserNode
 import com.intellij.openapi.vcs.changes.ui.ChangesBrowserNodeRenderer
 import com.intellij.openapi.vcs.changes.ui.ChangesBrowserSpecificFilePathsNode
 import com.intellij.openapi.vcs.changes.ui.ChangesGroupingPolicyFactory
+import com.intellij.openapi.vcs.changes.ui.ChangesListView
 import com.intellij.openapi.vcs.changes.ui.ChangesTree
 import com.intellij.openapi.vcs.changes.ui.ChangesTreeDnDSupport
 import com.intellij.openapi.vcs.changes.ui.HoverChangesTree
@@ -150,6 +151,16 @@ abstract class GitStageTree(project: Project,
       selectedChanges.map { ChangesUtil.getFilePath(it) }
     sink[VcsDataKeys.CHANGES] = selectedChanges.toArray(Change.EMPTY_CHANGE_ARRAY)
     sink[PlatformDataKeys.DELETE_ELEMENT_PROVIDER] = if (!selectedNodes.isEmpty) VirtualFileDeleteProvider() else null
+    val exactSelection = VcsTreeModelData.exactlySelected(this)
+    sink.lazy(ChangesListView.EXACTLY_SELECTED_FILES_DATA_KEY) {
+      (
+        VcsTreeModelData.mapToExactVirtualFile(exactSelection) +
+        selectedVirtualFiles(
+          exactSelection.iterateUserObjects(GitFileStatusNode::class.java),
+          exactSelection.iterateUserObjects(Change::class.java),
+        )
+      ).distinct()
+    }
 
     sink.lazy(VcsDataKeys.VIRTUAL_FILES) {
       selectedVirtualFiles(selectedNodes, selectedChanges)

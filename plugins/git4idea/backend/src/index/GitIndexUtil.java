@@ -24,6 +24,7 @@ import git4idea.commands.GitLineHandler;
 import git4idea.commands.GitLineHandlerListener;
 import git4idea.config.GitVersionSpecialty;
 import git4idea.repo.GitRepository;
+import git4idea.util.GitFileUtils;
 import git4idea.util.StringScanner;
 import org.jetbrains.annotations.NonNls;
 import org.jetbrains.annotations.NotNull;
@@ -67,7 +68,7 @@ public final class GitIndexUtil {
     GitLineHandler h = new GitLineHandler(project, root, GitCommand.LS_FILES);
     h.addParameters("-s");
     h.endOptions();
-    h.addRelativePaths(filePaths);
+    h.addParameters(GitFileUtils.toLiteralPathspecs(root, filePaths));
 
     h.addLineListener(new GitLineHandlerListener() {
       @Override
@@ -79,6 +80,21 @@ public final class GitIndexUtil {
     Git.getInstance().runCommandWithoutCollectingOutput(h).throwOnError();
 
     return result;
+  }
+
+  /**
+   * Returns whether any index stage contains an entry for the literal paths.
+   *
+   * Unlike {@link #listStaged(Project, VirtualFile, Collection)}, this includes conflict stages 1-3.
+   */
+  public static boolean hasIndexEntries(@NotNull Project project,
+                                        @NotNull VirtualFile root,
+                                        @NotNull Collection<? extends FilePath> filePaths) throws VcsException {
+    GitLineHandler h = new GitLineHandler(project, root, GitCommand.LS_FILES);
+    h.addParameters("-s");
+    h.endOptions();
+    h.addParameters(GitFileUtils.toLiteralPathspecs(root, filePaths));
+    return !Git.getInstance().runCommand(h).getOutputOrThrow().isBlank();
   }
 
   public static @Nullable StagedFile listTree(@NotNull GitRepository repository,
