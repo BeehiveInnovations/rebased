@@ -8,6 +8,7 @@ import com.intellij.ide.ProjectWidgetGradientLocationService
 import com.intellij.ide.ProjectWindowCustomizerService
 import com.intellij.ide.RecentProjectListActionProvider
 import com.intellij.ide.RecentProjectsManager
+import com.intellij.ide.RecentProjectsManagerBase
 import com.intellij.ide.RecentProjectsManager.RecentProjectsChange
 import com.intellij.ide.ReopenProjectAction
 import com.intellij.ide.UpdatesInfoProviderManager
@@ -46,7 +47,7 @@ import com.intellij.openapi.wm.impl.ToolbarComboButtonModel
 import com.intellij.project.ProjectStoreOwner
 import com.intellij.ui.AnimatedIcon
 import com.intellij.ui.ClientProperty
-import com.intellij.ui.GroupHeaderSeparator
+import com.intellij.ui.ExpandableItemsHandler
 import com.intellij.ui.IconManager
 import com.intellij.ui.IdeUICustomization
 import com.intellij.ui.components.JBLabel
@@ -60,8 +61,11 @@ import com.intellij.ui.popup.ActionPopupOptions
 import com.intellij.ui.popup.ActionPopupStep
 import com.intellij.ui.popup.PopupFactoryImpl
 import com.intellij.ui.popup.list.ListPopupImpl
-import com.intellij.ui.popup.list.ListPopupModel
+import com.intellij.ui.popup.list.PopupInlineActionsSupport
+import com.intellij.ui.popup.list.PopupListElementRenderer
 import com.intellij.ui.popup.list.SelectablePanel
+import com.intellij.ui.popup.list.buttonWidth
+import com.intellij.ui.popup.list.createSupport
 import com.intellij.ui.util.maximumWidth
 import com.intellij.util.IconUtil
 import com.intellij.util.ui.EmptyIcon
@@ -83,7 +87,7 @@ import java.awt.event.HierarchyEvent
 import java.beans.PropertyChangeListener
 import java.util.function.Function
 import java.util.function.Predicate
-import java.util.function.Supplier
+import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.Icon
 import javax.swing.JComponent
@@ -92,9 +96,9 @@ import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.ListCellRenderer
 import javax.swing.SwingUtilities
+import javax.swing.border.EmptyBorder
 import kotlin.io.path.invariantSeparatorsPathString
 
-private const val MAX_RECENT_COUNT = 100
 private val projectKey = Key.create<Project>("project-widget-project")
 private val showChevronKey = Key.create<Boolean>("project-widget-show-chevron")
 
@@ -120,7 +124,7 @@ open class ProjectToolbarWidgetAction : ExpandableComboAction(), DumbAware {
     val group = createActionGroup(event)
     if (group.childrenCount == 0) return null
     val step = createStep(group, event.dataContext)
-    return event.project?.let { createPopup(it = it, step = step) }
+    return event.project?.let { createPopup(project = it, step = step, event = event) }
   }
 
   override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
@@ -189,9 +193,10 @@ open class ProjectToolbarWidgetAction : ExpandableComboAction(), DumbAware {
     }
   }
 
-  private fun createPopup(it: Project, step: ListPopupStep<PopupFactoryImpl.ActionItem>): ListPopup {
-    val widgetRenderer = ProjectWidgetRenderer()
+  private fun createPopup(project: Project, step: ListPopupStep<PopupFactoryImpl.ActionItem>, event: AnActionEvent): ListPopup {
     val renderer = Function<ListCellRenderer<Any>, ListCellRenderer<out Any>> { base ->
+      // The producer runs during popup construction, before its initial row measurements.
+      val widgetRenderer = ProjectWidgetRenderer(createSupport((base as PopupListElementRenderer<*>).popup))
       ListCellRenderer<PopupFactoryImpl.ActionItem> { list, value, index, isSelected, cellHasFocus ->
         val action = (value as PopupFactoryImpl.ActionItem).action
         if (action is ProjectToolbarWidgetPresentable) {
@@ -209,16 +214,14 @@ open class ProjectToolbarWidgetAction : ExpandableComboAction(), DumbAware {
       }
     }
 
-    val result = JBPopupFactory.getInstance().createListPopup(it, step, renderer)
+    val result = JBPopupFactory.getInstance().createListPopup(project, step, renderer)
 
     if (result is ListPopupImpl) {
       ClientProperty.put(result.list, AnimatedIcon.ANIMATION_IN_RENDERER_ALLOWED, true)
 
       ApplicationManager.getApplication().messageBus.connect(result).subscribe(RecentProjectsManager.RECENT_PROJECTS_CHANGE_TOPIC, object : RecentProjectsChange {
         override fun change() {
-          updateChildGroupAvailability(result)
-
-          result.list.repaint()
+          refreshProjectActions(result, event)
         }
       })
     }
@@ -226,9 +229,27 @@ open class ProjectToolbarWidgetAction : ExpandableComboAction(), DumbAware {
     return result
   }
 
-  private fun updateChildGroupAvailability(listPopup: ListPopupImpl) {
+  /** Rebuilds section headings and keeps selection on the same project after its pin state changes. */
+  private fun refreshProjectActions(listPopup: ListPopupImpl, event: AnActionEvent) {
     val popupStep = listPopup.listStep as? ActionPopupStep ?: return
-    popupStep.updateStepItems(listPopup.list)
+    val selectedAction = (listPopup.list.selectedValue as? PopupFactoryImpl.ActionItem)?.action
+    val selectedKey = (selectedAction as? ProjectWidgetProjectAction)?.rowKey
+    val items = ActionPopupStep.createActionItems(
+      createActionGroup(event), Utils.createAsyncDataContext(event.dataContext), popupStep.actionPlace,
+      popupStep.presentationFactory, popupStep.options,
+    )
+    // Clear the inline-button index too: a Recent row has two controls, but a Pinned row has one.
+    listPopup.list.clearSelection()
+    popupStep.values.clear()
+    popupStep.values.addAll(items)
+    listPopup.onModelChanged()
+    val selectedItem = if (selectedKey == null) items.firstOrNull { it.action == selectedAction }
+    else items.firstOrNull { (it.action as? ProjectWidgetProjectAction)?.rowKey == selectedKey }
+         ?: items.firstOrNull { (it.action as? ProjectWidgetProjectAction)?.rowKey?.projectPath == selectedKey.projectPath }
+    if (selectedItem != null) {
+      listPopup.list.setSelectedValue(selectedItem, true)
+    }
+    listPopup.list.repaint()
   }
 
   private fun hideProjectSwitching(e: AnActionEvent): Boolean =
@@ -249,21 +270,11 @@ open class ProjectToolbarWidgetAction : ExpandableComboAction(), DumbAware {
       val group = ActionManager.getInstance().getAction("ProjectWidget.Actions") as ActionGroup
       result.addAll(group.getChildren(initEvent).asList())
 
-      val openProjectsPredicate = OpenProjectSelectionPredicateSupplier.getInstance().getPredicate()
-      val actionsMap = RecentProjectListActionProvider.getInstance().getActions(initEvent.project)
-        .asSequence()
-        .take(MAX_RECENT_COUNT)
-        .groupBy { openProjectsPredicate.test(it) }
-
-      actionsMap.get(true)?.let {
-        result.addSeparator(IdeUICustomization.getInstance().projectMessage("project.widget.open.projects"))
-        result.addAll(it)
-      }
-
-      actionsMap.get(false)?.let {
-        result.addSeparator(IdeUICustomization.getInstance().projectMessage("project.widget.recent.projects"))
-        result.addAll(it)
-      }
+      result.addAll(createProjectWidgetProjectActions(
+        RecentProjectListActionProvider.getInstance().getActions(initEvent.project),
+        OpenProjectSelectionPredicateSupplier.getInstance().getPredicate(),
+        RecentProjectsManagerBase.getInstanceEx(),
+      ))
     }
 
     return result
@@ -274,15 +285,10 @@ open class ProjectToolbarWidgetAction : ExpandableComboAction(), DumbAware {
     val asyncDataContext: DataContext = Utils.createAsyncDataContext(context)
     val options = ActionPopupOptions.showDisabled()
       .withSpeedSearchFilter(ProjectWidgetSpeedsearchFilter())
-    return ActionPopupStep.createActionsStep(
-      null,
-      actionGroup,
-      asyncDataContext,
-      ActionPlaces.PROJECT_WIDGET_POPUP,
-      presentationFactory,
-      Supplier { asyncDataContext },
-      options,
+    val items = ActionPopupStep.createActionItems(
+      actionGroup, asyncDataContext, ActionPlaces.PROJECT_WIDGET_POPUP, presentationFactory, options,
     )
+    return ProjectWidgetPopupStep(items, asyncDataContext, presentationFactory, ActionPopupOptions.convertForStep(options, items))
   }
 }
 
@@ -361,7 +367,7 @@ private class ProjectWidgetSpeedsearchFilter : SpeedSearchFilter<PopupFactoryImp
   }
 }
 
-private class ProjectWidgetRenderer : ListCellRenderer<PopupFactoryImpl.ActionItem> {
+private class ProjectWidgetRenderer(private val inlineActionsSupport: PopupInlineActionsSupport) : ListCellRenderer<PopupFactoryImpl.ActionItem> {
   override fun getListCellRendererComponent(
     list: JList<out PopupFactoryImpl.ActionItem>?,
     value: PopupFactoryImpl.ActionItem?,
@@ -369,20 +375,35 @@ private class ProjectWidgetRenderer : ListCellRenderer<PopupFactoryImpl.ActionIt
     isSelected: Boolean,
     cellHasFocus: Boolean,
   ): Component {
-    return createRecentProjectPane(value as PopupFactoryImpl.ActionItem, isSelected, getSeparator(list, value), index == 0)
-  }
-
-  private fun getSeparator(list: JList<out PopupFactoryImpl.ActionItem>?, value: PopupFactoryImpl.ActionItem?): ListSeparator? {
-    val model = list?.model as? ListPopupModel<*> ?: return null
-    val hasSeparator = model.isSeparatorAboveOf(value)
-    if (!hasSeparator) {
-      return null
+    val activeButtonIndex = if (isSelected && list != null) inlineActionsSupport.getActiveButtonIndex(list) else null
+    return createRecentProjectPane(
+      value as PopupFactoryImpl.ActionItem, isSelected, projectWidgetSeparator(list, value), index == 0, activeButtonIndex,
+    ).apply {
+      if (inlineActionsSupport.hasExtraButtons(value)) {
+        // An overflow preview would copy the row's trailing controls outside the menu.
+        ClientProperty.put(this, ExpandableItemsHandler.RENDERER_DISABLED, true)
+      }
     }
-    return ListSeparator(model.getCaptionAboveOf(value))
   }
 
-  private fun createRecentProjectPane(value: PopupFactoryImpl.ActionItem, isSelected: Boolean, separator: ListSeparator?, hideLine: Boolean): JComponent {
+  private fun createRecentProjectPane(
+    value: PopupFactoryImpl.ActionItem,
+    isSelected: Boolean,
+    separator: ListSeparator?,
+    hideLine: Boolean,
+    activeButtonIndex: Int?,
+  ): JComponent {
     val action = value.action as ProjectToolbarWidgetPresentable
+    val support = inlineActionsSupport
+    val savedProjectButtons = if (action is ProjectWidgetProjectAction && support.hasExtraButtons(value)) {
+      support.createExtraButtons(value, true, activeButtonIndex ?: -1)
+    }
+    else emptyList()
+    val iconSize = userScaledProjectIconSize()
+    val projectIcon = IconUtil.downscaleIconToSize(action.projectIcon, iconSize, iconSize)
+    // A fixed icon slot keeps the name and path still when the clear control appears on hover.
+    val iconComponent = if (isSelected && savedProjectButtons.size > 1) savedProjectButtons[1]
+    else JLabel(if (action is ProjectWidgetProjectAction) IconUtil.toSize(projectIcon, iconSize, iconSize) else projectIcon)
     lateinit var nameLbl: JLabel
     var providerPathLbl: JLabel? = null
     var projectPathLbl: JLabel? = null
@@ -390,9 +411,9 @@ private class ProjectWidgetRenderer : ListCellRenderer<PopupFactoryImpl.ActionIt
     val content = panel {
       customizeSpacingConfiguration(EmptySpacingConfiguration()) {
         row {
-          val rowGaps = UnscaledGaps(bottom = 2, top = 2)
+          val rowGaps = UnscaledGaps(bottom = PROJECT_WIDGET_ROW_GAP, top = PROJECT_WIDGET_ROW_GAP)
 
-          icon(IconUtil.downscaleIconToSize(action.projectIcon, userScaledProjectIconSize(), userScaledProjectIconSize()))
+          cell(iconComponent)
             .align(AlignY.TOP)
             .customize(rowGaps.copy(right = 8))
 
@@ -480,18 +501,47 @@ private class ProjectWidgetRenderer : ListCellRenderer<PopupFactoryImpl.ActionIt
         }
       }
     }.apply {
-      border = JBUI.Borders.empty(6, 0)
+      border = JBUI.Borders.empty(PROJECT_WIDGET_CONTENT_PADDING, 0)
       isOpaque = false
     }
 
     val result = SelectablePanel.wrap(content, JBUI.CurrentTheme.Popup.BACKGROUND)
     PopupUtil.configListRendererFlexibleHeight(result)
+    if (support.hasExtraButtons(value)) {
+      val buttons = if (action is ProjectWidgetProjectAction) {
+        ProjectWidgetPinButton(savedProjectButtons.first(), isSelected)
+      }
+      else {
+        JPanel().apply {
+          layout = BoxLayout(this, BoxLayout.X_AXIS)
+          isOpaque = false
+          val extraButtons = support.createExtraButtons(value, isSelected, activeButtonIndex ?: -1)
+          if (extraButtons.isEmpty()) {
+            add(Box.createHorizontalStrut(buttonWidth() * support.calcExtraButtonsCount(value)))
+          }
+          else {
+            extraButtons.forEach { add(it) }
+          }
+        }
+      }
+      result.add(buttons, BorderLayout.EAST)
+      // These insets are shared with hit testing and are already scaled.
+      @Suppress("UseDPIAwareBorders")
+      result.border = EmptyBorder(projectWidgetRowInsets())
+    }
     if (isSelected) {
       result.selectionColor = ListPluginComponent.SELECTION_COLOR
     }
 
     AccessibleContextUtil.setCombinedName(result, nameLbl, " - ", providerPathLbl, " - ", projectPathLbl)
     AccessibleContextUtil.setCombinedDescription(result, nameLbl, " - ", providerPathLbl, " - ", projectPathLbl)
+    if (activeButtonIndex != null && activeButtonIndex < support.calcExtraButtonsCount(value)) {
+      val buttonText = support.getToolTipText(value, activeButtonIndex)
+      result.toolTipText = buttonText
+      result.accessibleContext.accessibleName = AccessibleContextUtil.combineAccessibleStrings(
+        result.accessibleContext.accessibleName, " - ", buttonText,
+      )
+    }
 
     if (separator == null) {
       return result
@@ -499,28 +549,15 @@ private class ProjectWidgetRenderer : ListCellRenderer<PopupFactoryImpl.ActionIt
 
     val res = NonOpaquePanel(BorderLayout())
     res.border = JBUI.Borders.empty()
-    res.add(createSeparator(separator, hideLine), BorderLayout.NORTH)
+    res.add(createProjectWidgetSeparator(separator, hideLine), BorderLayout.NORTH)
     res.add(result, BorderLayout.CENTER)
 
     AccessibleContextUtil.setName(res, result)
     AccessibleContextUtil.setDescription(res, result)
+    res.toolTipText = result.toolTipText
 
     return res
   }
-}
-
-private fun createSeparator(separator: ListSeparator, hideLine: Boolean): JComponent {
-  val res = GroupHeaderSeparator(JBUI.CurrentTheme.Popup.separatorLabelInsets())
-  res.caption = separator.text
-  res.setHideLine(hideLine)
-
-  val panel = JPanel(BorderLayout())
-  panel.border = JBUI.Borders.empty()
-  panel.isOpaque = true
-  panel.background = JBUI.CurrentTheme.Popup.BACKGROUND
-  panel.add(res)
-
-  return panel
 }
 
 

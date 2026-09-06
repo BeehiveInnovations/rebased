@@ -577,7 +577,9 @@ public class PopupListElementRenderer<E> extends GroupedItemsListRenderer<E> {
     return selected ? getSelectionBackground() : getBackground();
   }
 
-  static @NotNull Insets getListCellPadding() {
+  /** Returns the scaled row padding shared by popup renderers and inline-button hit testing. */
+  @ApiStatus.Internal
+  public static @NotNull Insets getListCellPadding() {
     if (ExperimentalUI.isNewUI()) {
       int leftRightInset = JBUI.CurrentTheme.Popup.Selection.LEFT_RIGHT_INSET.get();
       return JBUI.insets(0, leftRightInset, 0, leftRightInset);

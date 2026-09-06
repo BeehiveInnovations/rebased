@@ -18,6 +18,10 @@ class RecentProjectMetaInfo : BaseState() {
   @get:Attribute
   var opened: Boolean by property(false)
 
+  /** Keeps this project available in the project widget without using the recent-project allowance. */
+  @get:Attribute
+  var pinned: Boolean by property(false)
+
   /**
    * If true, the project will not be reopened on startup and not displayed in the recent projects list.
    * Suitable for internal projects that should not be accessed by usual ways of opening projects.

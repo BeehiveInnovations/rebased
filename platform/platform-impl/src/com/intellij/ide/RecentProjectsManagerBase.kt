@@ -283,6 +283,27 @@ open class RecentProjectsManagerBase(coroutineScope: CoroutineScope) :
     }
   }
 
+  /** Returns the saved pin state for the same system-independent path used by recent projects. */
+  @Internal
+  fun isProjectPinned(path: String): Boolean = synchronized(stateLock) {
+    state.additionalInfo[path]?.pinned == true
+  }
+
+  /**
+   * Pins or unpins a known project without changing its recency or other metadata.
+   * Unknown paths are ignored. Changes notify recent-project views on the EDT.
+   */
+  @Internal
+  fun setProjectPinned(path: String, pinned: Boolean) {
+    synchronized(stateLock) {
+      val info = state.additionalInfo[path] ?: return
+      if (info.pinned == pinned) return
+      info.pinned = pinned
+      modCounter.increment()
+    }
+    fireChangeEvent()
+  }
+
   private fun removePathsFromGroups(paths: Collection<String>): Int {
     if (paths.isEmpty() || state.groups.isEmpty()) {
       return 0
@@ -1150,7 +1171,8 @@ private fun getLastProjectFrameInfoFile() = getSystemDir().resolve("lastProjectF
 
 private fun trimRecentProjects(modCounter: LongAdder, map: MutableMap<String, RecentProjectMetaInfo>): List<String> {
   val limit = AdvancedSettings.getInt("ide.max.recent.projects")
-  var toRemove = map.size - limit
+  // Pins have their own lifetime and must not displace ordinary recent projects.
+  var toRemove = map.values.count { !it.pinned } - limit
   if (limit < 1 || toRemove <= 0) {
     return emptyList()
   }
@@ -1159,7 +1181,7 @@ private fun trimRecentProjects(modCounter: LongAdder, map: MutableMap<String, Re
   val iterator = map.entries.iterator()
   while (iterator.hasNext()) {
     val entry = iterator.next()
-    if (entry.value.opened) {
+    if (entry.value.opened || entry.value.pinned) {
       continue
     }
 

@@ -2,6 +2,7 @@
 package com.intellij.ide
 
 import com.intellij.configurationStore.deserializeInto
+import com.intellij.configurationStore.serialize
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.util.JDOMUtil
 import com.intellij.platform.util.coroutines.childScope
@@ -662,6 +663,135 @@ class RecentProjectManagerTest {
     element.getChild("component")!!.deserializeInto(state)
     manager.loadState(state)
     assertThat(manager.getRecentPaths().joinToString(separator = "\n")).isEqualTo(Array(50) { "/home/boo/project-${it + 10}" }.reversed().joinToString(separator = "\n"))
+  }
+
+  @Test
+  fun `pinned projects survive trimming without using the recent project allowance`(): Unit = test { manager ->
+    val state = RecentProjectManagerState()
+    // Load the persisted flag so this also covers pins restored on the next IDE start.
+    val pinned = RecentProjectMetaInfo()
+    JDOMUtil.load("""<RecentProjectMetaInfo pinned="true" displayName="Pinned project" />""").deserializeInto(pinned)
+    state.additionalInfo["/home/boo/pinned"] = pinned
+    for (i in 0 until 60) {
+      state.additionalInfo["/home/boo/recent-$i"] = RecentProjectMetaInfo()
+    }
+    manager.loadState(state)
+
+    assertThat(manager.getRecentPaths()).containsExactlyElementsOf(
+      (10 until 60).reversed().map { "/home/boo/recent-$it" } + "/home/boo/pinned"
+    )
+    assertThat(manager.getDisplayName("/home/boo/pinned")).isEqualTo("Pinned project")
+  }
+
+  @Test
+  fun `pin changes persist without changing recency or other project metadata`(): Unit = test { manager ->
+    val path = "/home/boo/project"
+    val state = RecentProjectManagerState()
+    state.additionalInfo[path] = RecentProjectMetaInfo().also {
+      it.displayName = "My project"
+      it.projectOpenTimestamp = 123
+      it.activationTimestamp = 456
+      it.opened = true
+    }
+    state.additionalInfo["/home/boo/newer"] = RecentProjectMetaInfo()
+    manager.loadState(state)
+    val recentPaths = manager.getRecentPaths()
+    val modificationCount = manager.modificationCount
+
+    manager.setProjectPinned(path, true)
+    assertTrue(manager.isProjectPinned(path))
+    assertThat(manager.modificationCount).isGreaterThan(modificationCount)
+    assertThat(manager.getRecentPaths()).containsExactlyElementsOf(recentPaths)
+
+    val restoredState = RecentProjectManagerState()
+    serialize(manager.state)!!.deserializeInto(restoredState)
+    manager.loadState(restoredState)
+    assertTrue(manager.isProjectPinned(path))
+    val restoredInfo = manager.getProjectMetaInfo(path)!!
+    assertThat(restoredInfo.displayName).isEqualTo("My project")
+    assertThat(restoredInfo.projectOpenTimestamp).isEqualTo(123)
+    assertThat(restoredInfo.activationTimestamp).isEqualTo(456)
+    assertTrue(restoredInfo.opened)
+    assertThat(manager.getRecentPaths()).containsExactlyElementsOf(recentPaths)
+
+    manager.setProjectPinned(path, false)
+    assertFalse(manager.isProjectPinned(path))
+    assertThat(manager.getRecentPaths()).containsExactlyElementsOf(recentPaths)
+    assertFalse(manager.isProjectPinned("/home/boo/newer"))
+  }
+
+  @Test
+  fun `unpinning returns an old project to normal recent trimming`(): Unit = test { manager ->
+    val state = RecentProjectManagerState()
+    state.additionalInfo["/home/boo/pinned"] = RecentProjectMetaInfo().also { it.pinned = true }
+    for (i in 0 until 50) {
+      state.additionalInfo["/home/boo/recent-$i"] = RecentProjectMetaInfo()
+    }
+    manager.loadState(state)
+    assertThat(manager.getRecentPaths()).hasSize(51)
+
+    manager.setProjectPinned("/home/boo/pinned", false)
+    assertThat(manager.getRecentPaths()).containsExactlyElementsOf((0 until 50).reversed().map { "/home/boo/recent-$it" })
+    assertFalse(manager.hasPath("/home/boo/pinned"))
+  }
+
+  @Test
+  fun `pin changes notify views once and ignore missing or unchanged projects`(): Unit = test { manager ->
+    val path = "/home/boo/project"
+    manager.loadState(RecentProjectManagerState().also { it.additionalInfo[path] = RecentProjectMetaInfo() })
+    var changes = 0
+    val connection = ApplicationManager.getApplication().messageBus.simpleConnect()
+    try {
+      connection.subscribe(RecentProjectsManager.RECENT_PROJECTS_CHANGE_TOPIC, object : RecentProjectsManager.RecentProjectsChange {
+        override fun change() {
+          changes++
+        }
+      })
+      manager.setProjectPinned(path, true)
+      manager.setProjectPinned(path, true)
+      manager.setProjectPinned("/home/boo/unknown", true)
+      ApplicationManager.getApplication().invokeAndWait { }
+      assertThat(changes).isEqualTo(1)
+      assertThat(manager.getRecentPaths()).containsExactly(path)
+
+      manager.setProjectPinned(path, false)
+      ApplicationManager.getApplication().invokeAndWait { }
+      assertThat(changes).isEqualTo(2)
+      assertThat(manager.getRecentPaths()).containsExactly(path)
+    }
+    finally {
+      connection.disconnect()
+    }
+  }
+
+  @Test
+  fun `removing a pinned project clears its pin history and group membership`(): Unit = test { manager ->
+    val missingPath = "/home/boo/missing"
+    val remainingPath = "/home/boo/remaining"
+    val state = RecentProjectManagerState()
+    state.additionalInfo[missingPath] = RecentProjectMetaInfo().also { it.pinned = true }
+    state.additionalInfo[remainingPath] = RecentProjectMetaInfo().also { it.pinned = true }
+    state.groups.add(ProjectGroup("Projects").also {
+      it.addProject(missingPath)
+      it.addProject(remainingPath)
+    })
+    manager.loadState(state)
+
+    // The missing-project dialog's Remove from List choice calls this same operation.
+    manager.removePath(missingPath)
+    assertFalse(manager.isProjectPinned(missingPath))
+    assertFalse(manager.hasPath(missingPath))
+    assertThat(manager.getRecentPaths()).containsExactly(remainingPath)
+    assertThat(manager.groups.single().projects).containsExactly(remainingPath)
+    assertTrue(manager.isProjectPinned(remainingPath))
+
+    val restoredState = RecentProjectManagerState()
+    serialize(manager.state)!!.deserializeInto(restoredState)
+    manager.loadState(restoredState)
+    assertFalse(manager.isProjectPinned(missingPath))
+    assertThat(manager.getRecentPaths()).containsExactly(remainingPath)
+    assertThat(manager.groups.single().projects).containsExactly(remainingPath)
+    assertTrue(manager.isProjectPinned(remainingPath))
   }
 
   @Test

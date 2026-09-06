@@ -700,6 +700,9 @@ public class ListPopupImpl extends WizardPopup implements ListPopup, NextStepHan
 
     boolean updateEmptyModel = myListModel.getSize() == 0;
     myListModel.syncModel();
+    // A reordered model can put another item under the pointer while selection follows the moved item.
+    // Recheck that row on the next mouse movement, without changing keyboard selection here.
+    myMouseMotionListener.myLastSelectedIndex = -2;
     if (updateEmptyModel) {
       selectFirstSelectableItem();
       pack(true, true);

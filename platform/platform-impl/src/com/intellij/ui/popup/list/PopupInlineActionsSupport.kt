@@ -31,8 +31,15 @@ internal interface PopupInlineActionsSupport {
   fun getActiveButtonIndex(list: JList<*>): Int? = (list as? ListPopupImpl.ListWithInlineButtons)?.selectedButtonIndex
 }
 
+/** Lets a popup step supply its row geometry while retaining the standard inline action handling. */
+internal interface PopupInlineActionsSupportProvider {
+  /** Called during popup construction; implementations must not access the popup's own support field. */
+  fun createInlineActionsSupport(popup: ListPopupImpl): PopupInlineActionsSupport
+}
+
 internal fun createSupport(popup: ListPopupImpl): PopupInlineActionsSupport {
   if (!ExperimentalUI.isNewUI()) return Empty
+  (popup.listStep as? PopupInlineActionsSupportProvider)?.let { return it.createInlineActionsSupport(popup) }
   if (popup.listStep is ActionPopupStep) return PopupInlineActionsSupportImpl(popup)
   return NonActionsPopupInlineSupport(popup)
 }
