@@ -152,7 +152,8 @@ class PlatformProjectOpenProcessor : ProjectOpenProcessor(), CommandLineProjectO
 
       if (originalOptions.createModule && Files.isDirectory(file)) {
         val options = runUnderModalProgressIfIsEdt {
-          createOptionsToOpenDotIdeaOrCreateNewIfNotExists(file, projectToClose = null).copy(
+          // Reuse the initiating project's window even if focus changes while opening the directory.
+          createOptionsToOpenDotIdeaOrCreateNewIfNotExists(file, projectToClose = originalOptions.projectToClose).copy(
             projectName = originalOptions.projectName,
             beforeOpen = {
               it.putUserData(PROJECT_OPENED_BY_PLATFORM_PROCESSOR, true)
@@ -221,7 +222,8 @@ class PlatformProjectOpenProcessor : ProjectOpenProcessor(), CommandLineProjectO
         // todo: originalOptions should not be dropped
         return ProjectManagerEx.getInstanceEx().openProjectAsync(
           projectIdentityFile = file,
-          options = createOptionsToOpenDotIdeaOrCreateNewIfNotExists(file, projectToClose = null).copy(
+          // Keep the initiating project when applying the directory's project-configuration defaults.
+          options = createOptionsToOpenDotIdeaOrCreateNewIfNotExists(file, projectToClose = originalOptions.projectToClose).copy(
             projectName = originalOptions.projectName,
             beforeOpen = {
               it.putUserData(PROJECT_OPENED_BY_PLATFORM_PROCESSOR, true)

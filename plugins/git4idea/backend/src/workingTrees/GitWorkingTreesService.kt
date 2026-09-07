@@ -3,8 +3,8 @@ package git4idea.workingTrees
 
 import com.intellij.CommonBundle
 import com.intellij.dvcs.repo.repositoryId
-import com.intellij.ide.GeneralSettings
 import com.intellij.ide.RecentProjectsManager
+import com.intellij.ide.impl.OpenProjectTask
 import com.intellij.ide.impl.ProjectUtil
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.application.ApplicationActivationListener
@@ -224,7 +224,7 @@ internal class GitWorkingTreesService(private val project: Project, val coroutin
 
         return@launch
       }
-      openProjectInNewWindow(Path(tree.path.path))
+      openWorkingTreeProject(Path(tree.path.path))
     }
   }
 
@@ -351,16 +351,12 @@ internal class GitWorkingTreesService(private val project: Project, val coroutin
     }
   }
 
-  suspend fun openProjectInNewWindow(path: Path): Project? {
-    val generalSettings = GeneralSettings.getInstance()
-    val savedConfirmOpen = generalSettings.confirmOpenNewProject
-    try {
-      generalSettings.confirmOpenNewProject = GeneralSettings.OPEN_PROJECT_ASK
-      return ProjectUtil.openOrImportAsync(path)
-    }
-    finally {
-      generalSettings.confirmOpenNewProject = savedConfirmOpen
-    }
+  /**
+   * Opens [path] using the saved project-window preference, with this service's project as the window to reuse.
+   * The platform owns both the prompt and any remembered choice. Returns null if opening is cancelled or declined.
+   */
+  suspend fun openWorkingTreeProject(path: Path): Project? {
+    return ProjectUtil.openOrImportAsync(path, OpenProjectTask(projectToClose = project))
   }
 }
 

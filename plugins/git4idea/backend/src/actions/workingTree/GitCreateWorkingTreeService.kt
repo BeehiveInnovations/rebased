@@ -132,7 +132,7 @@ internal class GitCreateWorkingTreeService(private val coroutineScope: Coroutine
 
     TrustedProjects.setProjectTrusted(Path(workingTreeData.workingTreePath.path), true)
 
-    val worktreeProject = gitWTService.openProjectInNewWindow(Path(workingTreeData.workingTreePath.path))
+    val worktreeProject = gitWTService.openWorkingTreeProject(Path(workingTreeData.workingTreePath.path))
 
     if (worktreeProject != null) {
       GitOperationsCollector.logWorktreeProjectOpenedAfterCreation(ideActivity)
